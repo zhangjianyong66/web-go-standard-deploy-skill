@@ -1,0 +1,5 @@
+display_name: Web Go Standard Deploy
+short_description: Standardized safe deployment for static web + Go service on ecs1 with nginx and SSL renew checks.
+default_prompt: >-
+  Deploy a web project (frontend static + Go backend) to ecs1 using precheck-gated rollout,
+  nginx validation/reload, health checks, and rollback-safe switching.
