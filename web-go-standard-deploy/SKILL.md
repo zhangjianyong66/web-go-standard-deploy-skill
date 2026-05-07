@@ -1,104 +1,116 @@
 ---
 name: web-go-standard-deploy
-description: Use when deploying a web project with static frontend + Go backend on ecs1, with Nginx reverse proxy and SSL auto-renew checks, requiring precheck-gated rollout and rollback safety.
+description: Deploy Vue static files to ecs1 Nginx and route /api to local Mac Go service through FRP, with precheck, postcheck, and rollback guardrails.
 ---
 
-# Web + Go Standard Deploy (ecs1)
+# Web + Go Hybrid Deploy (ecs1 + Mac via FRP)
 
 ## Overview
-This skill standardizes deployment for mixed projects (frontend static files + Go API) on `root@ecs1.zhangjianyong.top`.
+This skill supports two modes:
+- `MODE=frp-hybrid` (default): frontend on ecs1, Go API on local Mac, ecs1 Nginx proxies `/api` to FRP mapped port.
+- `MODE=remote-full`: legacy mode where frontend + Go both run on ecs1.
 
-Default policy: **verify first, then switch**, with explicit rollback checkpoints.
+Default policy: **precheck first, then switch, then postcheck**.
 
-## Environment Facts (locked)
-- SSH: passwordless access is available for `root@ecs1.zhangjianyong.top`
-- OS: CentOS 8
-- Nginx active config root: `/usr/local/nginx/conf/conf.d`
-- Go process management: prefer `systemd` services (for example `blog-go.service`)
-- SSL renew mechanism: `/root/ssl_auto_renew/ssl_auto_renew.sh` + root `crontab`
+## Environment Facts (confirmed 2026-05-07)
+- Remote host: `root@ecs1.zhangjianyong.top`
+- ECS1 OS: CentOS 8
+- Nginx config root: `/usr/local/nginx/conf/conf.d`
+- FRPS on ecs1: `/etc/frp/frps.ini` (`bind_port=7000`) with `frps.service`
+- SSL renew: `/root/ssl_auto_renew/ssl_auto_renew.sh` + root `crontab`
+- Local Mac currently needs `frpc` installed for `frp-hybrid`
 
 ## Required Inputs
-Set these variables before running scripts:
+Common:
+- `APP_NAME`
+- `DOMAIN`
+- `FRONTEND_DIST`
 
-- `APP_NAME`: logical app name, e.g. `storieshub`
-- `DOMAIN`: external domain, e.g. `storieshub.zhangjianyong.top`
-- `FRONTEND_DIST`: local built frontend directory
-- `GO_SERVICE`: systemd service name, e.g. `blog-go.service`
-- `GO_HEALTH_URL`: backend health endpoint, e.g. `http://127.0.0.1:18080/health`
+Common optional:
+- `MODE` default `frp-hybrid`
+- `REMOTE_HOST` default `root@ecs1.zhangjianyong.top`
+- `RELEASE_ROOT` default `/opt/web-projects-hub/releases`
+- `CURRENT_LINK` default `/opt/web-projects-hub/current/$APP_NAME`
+- `NGINX_CONF` default `/usr/local/nginx/conf/conf.d/$DOMAIN.conf`
+- `API_PREFIX` default `/api`
 
-Optional:
-- `REMOTE_HOST` default: `root@ecs1.zhangjianyong.top`
-- `RELEASE_ROOT` default: `/opt/web-projects-hub/releases`
-- `CURRENT_LINK` default: `/opt/web-projects-hub/current/$APP_NAME`
-- `NGINX_CONF` default: `/usr/local/nginx/conf/conf.d/$DOMAIN.conf`
-- `BACKEND_PORT`: for port checks
+For `MODE=frp-hybrid`:
+- `LOCAL_GO_HEALTH_URL` (example: `http://127.0.0.1:18080/health`)
+- `LOCAL_GO_PORT` (example: `18080`)
+- `FRP_SERVER_ADDR` default `ecs1.zhangjianyong.top`
+- `FRP_SERVER_PORT` default `7000`
+- `FRP_TOKEN` (must be injected from secret env)
+- `FRP_REMOTE_PORT` default `17080`
+
+For `MODE=remote-full`:
+- `GO_SERVICE`
+- `GO_HEALTH_URL`
+
+## Nginx Requirements (`frp-hybrid`)
+In `$NGINX_CONF`, include API reverse proxy:
+
+```nginx
+location /api/ {
+    proxy_pass http://127.0.0.1:17080/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+If `API_PREFIX` is changed, make Nginx location match it.
+
+## FRP Startup on Mac (`frp-hybrid`)
+Use bundled helper:
+
+```bash
+export APP_NAME="myapp"
+export FRP_SERVER_ADDR="ecs1.zhangjianyong.top"
+export FRP_SERVER_PORT="7000"
+export FRP_TOKEN="<secret>"
+export LOCAL_GO_PORT="18080"
+export FRP_REMOTE_PORT="17080"
+
+./scripts/frp/run-frpc.sh
+```
 
 ## Standard Flow
-1. Precheck (`scripts/precheck.sh`)
-- Validate SSH connectivity
-- Validate required vars
-- Validate `systemctl` service existence
-- Validate nginx config file existence and syntax (`nginx -t`)
-- Validate SSL renew job and script presence
-- Validate host disk usage
+1. `./scripts/precheck.sh`
+2. Build frontend locally (`npm run build`)
+3. `./scripts/deploy.sh`
+4. `./scripts/postcheck.sh`
+5. If failed: `./scripts/rollback.sh`
 
-2. Build & Package
-- Build frontend locally (`npm run build` or project equivalent)
-- Build Go binary locally or in CI
-- Ensure artifacts are versioned by release id (timestamp)
-
-3. Upload to release directory
-- Target: `$RELEASE_ROOT/$APP_NAME/$RELEASE_ID`
-- Upload frontend assets to `dist/`
-- Upload backend binary to `bin/`
-
-4. Switch with checks (`scripts/deploy.sh`)
-- Create/update `previous` symlink from current
-- Atomically switch `current` symlink to new release
-- Run `systemctl restart $GO_SERVICE`
-- Run backend health check
-- Run `nginx -t` then reload nginx
-- Run HTTP check on `https://$DOMAIN`
-
-5. Postcheck (`scripts/postcheck.sh`)
-- Confirm service is active
-- Confirm endpoint healthy
-- Confirm TLS cert remaining days above threshold
-- Confirm ssl auto-renew cron entries still present
-
-6. Rollback (`scripts/rollback.sh`) when any check fails
-- Switch `current` back to `previous`
-- Restart go service
-- Reload nginx
-- Re-run health checks
-
-## Guardrails
-- Never reload nginx before passing `nginx -t`
-- Never delete prior release until new release passes health checks
-- Any failure in deploy script must stop immediately (`set -euo pipefail`)
-
-## Command Examples
+## Command Example (`frp-hybrid`, recommended)
 ```bash
+export MODE="frp-hybrid"
 export APP_NAME="storieshub"
 export DOMAIN="storieshub.zhangjianyong.top"
 export FRONTEND_DIST="./dist"
-export GO_SERVICE="blog-go.service"
-export GO_HEALTH_URL="http://127.0.0.1:18080/health"
-export REMOTE_HOST="root@ecs1.zhangjianyong.top"
+export LOCAL_GO_HEALTH_URL="http://127.0.0.1:18080/health"
+export LOCAL_GO_PORT="18080"
+export FRP_SERVER_ADDR="ecs1.zhangjianyong.top"
+export FRP_SERVER_PORT="7000"
+export FRP_TOKEN="<secret>"
+export FRP_REMOTE_PORT="17080"
+export API_PREFIX="/api"
 
+./scripts/frp/run-frpc.sh
 ./scripts/precheck.sh
 ./scripts/deploy.sh
 ./scripts/postcheck.sh
 ```
 
-Rollback:
-```bash
-./scripts/rollback.sh
-```
+## Guardrails
+- Never reload nginx before `nginx -t` passes.
+- Never store `FRP_TOKEN` in repo files.
+- Keep Go API binding on Mac at `127.0.0.1`.
+- Keep previous release symlink for rollback.
 
 ## Acceptance Criteria
-- `systemctl is-active $GO_SERVICE` returns `active`
-- `curl $GO_HEALTH_URL` returns success
-- `curl -I https://$DOMAIN` returns 200/301/302 as expected
-- `nginx -t` passes and nginx reload succeeds
-- SSL renew script and cron entries remain valid
+- `https://$DOMAIN` returns expected site response.
+- `https://$DOMAIN$API_PREFIX/health` is healthy.
+- `nginx -t` passes and reload succeeds.
+- SSL renew script and cron entries remain valid.
+- (`remote-full` only) `systemctl is-active $GO_SERVICE` is `active`.

@@ -1,0 +1,13 @@
+# Render with envsubst, then run:
+# frpc -c ./frpc.toml
+serverAddr = "${FRP_SERVER_ADDR}"
+serverPort = ${FRP_SERVER_PORT}
+auth.method = "token"
+auth.token = "${FRP_TOKEN}"
+
+[[proxies]]
+name = "${APP_NAME}-go-api"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = ${LOCAL_GO_PORT}
+remotePort = ${FRP_REMOTE_PORT}

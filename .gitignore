@@ -4,3 +4,10 @@
 *.log
 .env
 .env.*
+*.out
+*.tmp
+*.cache
+*.pid
+*.seed
+.pytest_cache/
+coverage/
